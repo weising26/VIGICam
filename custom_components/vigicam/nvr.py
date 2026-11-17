@@ -14,9 +14,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 
 from .const import (
+    BRAND,
     CONF_DEVICE_TYPE,
     CONF_NVR_API,
     CONF_NVR_EVENT_PUSH,
@@ -101,6 +103,21 @@ async def async_setup_nvr_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool
 async def _async_finish_setup(
     hass: HomeAssistant, entry: ConfigEntry, coordinator: VIGINVRCoordinator, host: str
 ) -> None:
+    # Register the NVR device before any entity names it as via_device: newer Home
+    # Assistant refuses a via_device link to a device that doesn't exist yet, which
+    # dropped every channel's camera except whichever loaded after the NVR device.
+    data = hass.data[DOMAIN][entry.entry_id]
+    info = data.get("info") or {}
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"nvr_{entry.entry_id}")},
+        name=data["name"],
+        manufacturer=BRAND,
+        model=info.get("device_type") or "VIGI NVR",
+        sw_version=(info.get("firm_ver") or "").split(" Build")[0] or None,
+        serial_number=info.get("serial_number"),
+        configuration_url=f"https://{host}",
+    )
     await hass.config_entries.async_forward_entry_setups(entry, NVR_PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
