@@ -29,10 +29,13 @@ import logging
 import os
 import ssl
 import urllib.parse
+import warnings
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .api import VIGICamera, make_ssl_context
+import aiohttp
+
+from .api import VIGICamera
 from .event_image import _ws_encode, _ws_recv
 
 _LOGGER = logging.getLogger(__name__)
@@ -143,6 +146,33 @@ class StreamParser:
             parts.append((headers.get("content-type", ""), headers, body))
 
 
+# The NVR1008H's web server (firmware 1.1.2) rejects every cipher suite Python offers by
+# default: the handshake fails with SSLV3_ALERT_HANDSHAKE_FAILURE. These older suites
+# (static RSA, CBC) are added on top of the defaults, and TLS 1.0 is allowed. Fine for a
+# box on the LAN whose certificate isn't verified anyway.
+_NVR_CIPHERS = (
+    "DEFAULT:AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA256:AES128-SHA256:"
+    "AES256-SHA:AES128-SHA:DES-CBC3-SHA:@SECLEVEL=0"
+)
+
+
+def nvr_ssl_context() -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.set_ciphers(_NVR_CIPHERS)
+    except ssl.SSLError:  # an OpenSSL build without some of them
+        ctx.set_ciphers("DEFAULT:AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA:AES128-SHA:@SECLEVEL=0")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1
+    except (ValueError, ssl.SSLError):
+        pass
+    return ctx
+
+
 class VIGINVRStreamError(Exception):
     pass
 
@@ -154,20 +184,34 @@ class VIGINVRWeb:
         self._host = host
         self._username = username
         self._password = password
+        self._ssl: ssl.SSLContext = nvr_ssl_context()
+        self._session: aiohttp.ClientSession | None = None
         self._cam = VIGICamera(host, username, password, session=None)
-        self._ssl: ssl.SSLContext = make_ssl_context(False)
+
+    def _ensure_session(self) -> None:
+        """Hand VIGICamera a session with the wider TLS settings (it never closes it)."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=self._ssl),
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+            self._cam._ha_session = self._session
 
     @property
     def host(self) -> str:
         return self._host
 
     async def login(self) -> None:
+        self._ensure_session()
         await self._cam.authenticate()
 
     async def close(self) -> None:
         await self._cam.close()
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
 
     async def call(self, body: dict) -> dict:
+        self._ensure_session()
         return await self._cam._request(body)
 
     async def system_info(self) -> dict:

@@ -158,3 +158,53 @@ def test_preview_login_and_ts(tmp_path):
 def test_preview_wrong_password(tmp_path):
     got, _ = _run_stream(tmp_path, "wrong")
     assert isinstance(got, nvr_web.VIGINVRStreamError)
+
+
+def test_tls_context_reaches_legacy_only_server(tmp_path):
+    """A server offering only static-RSA CBC suites, like the NVR's, still connects."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "nvr")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(2)
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=1)).sign(key, hashes.SHA256()))
+    (tmp_path / "r.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    (tmp_path / "rk.pem").write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(tmp_path / "r.pem", tmp_path / "rk.pem")
+    server_ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    server_ctx.set_ciphers("AES128-SHA:@SECLEVEL=0")
+
+    async def main():
+        async def handle(reader, writer):
+            writer.write(b"ok")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_ctx)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            # Python's default client context can't talk to it...
+            strict = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            strict.check_hostname, strict.verify_mode = False, ssl.CERT_NONE
+            try:
+                r, w = await asyncio.open_connection("127.0.0.1", port, ssl=strict)
+                strict_ok = (await r.read()) == b"ok"
+                w.close()
+            except (ssl.SSLError, ConnectionError):
+                strict_ok = False
+            # ...the NVR context can.
+            r, w = await asyncio.open_connection("127.0.0.1", port, ssl=nvr_web.nvr_ssl_context())
+            data = await r.read()
+            w.close()
+            return strict_ok, data
+        finally:
+            server.close()
+
+    strict_ok, data = asyncio.run(main())
+    assert not strict_ok
+    assert data == b"ok"
