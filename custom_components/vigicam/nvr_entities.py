@@ -142,7 +142,8 @@ class VIGINVRChannelEntity(VIGINVREntity):
             name=f"{name}",
             manufacturer=BRAND,
             model=f"NVR channel {self._channel}",
-            via_device=self._nvr_identifier,
+            # No via_device: deprecated in HA 2026.11 and fatal for camera entities
+            # there. nvr.py links each channel device to the NVR with via_device_id.
         )
         if dev.get("firmware"):
             info["sw_version"] = str(dev["firmware"]).split(" Build")[0]

@@ -104,12 +104,14 @@ async def async_setup_nvr_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool
 async def _async_finish_setup(
     hass: HomeAssistant, entry: ConfigEntry, coordinator: VIGINVRCoordinator, host: str
 ) -> None:
-    # Register the NVR device before any entity names it as via_device: newer Home
-    # Assistant refuses a via_device link to a device that doesn't exist yet, which
-    # dropped every channel's camera except whichever loaded after the NVR device.
+    # Devices are created here rather than from the entities' DeviceInfo. Home Assistant
+    # 2026.11 deprecates DeviceInfo's via_device, and for camera entities that stops the
+    # entity loading at all, so the channel-to-NVR link is set with via_device_id, which
+    # every supported version accepts through async_update_device.
     data = hass.data[DOMAIN][entry.entry_id]
     info = data.get("info") or {}
-    dr.async_get(hass).async_get_or_create(
+    dev_reg = dr.async_get(hass)
+    nvr_device = dev_reg.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, f"nvr_{entry.entry_id}")},
         name=data["name"],
@@ -119,6 +121,18 @@ async def _async_finish_setup(
         serial_number=info.get("serial_number"),
         configuration_url=f"https://{host}",
     )
+    for ch, dev in sorted(((coordinator.data or {}).get("devices") or {}).items()):
+        channel_device = dev_reg.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, f"nvr_{entry.entry_id}_ch{ch}")},
+            name=dev.get("name") or dev.get("alias") or f"Channel {ch}",
+            manufacturer=BRAND,
+            model=f"NVR channel {ch}",
+            sw_version=str(dev.get("firmware") or "").split(" Build")[0] or None,
+            configuration_url=f"http://{dev['ip']}" if dev.get("ip") else None,
+        )
+        if channel_device.via_device_id != nvr_device.id:
+            dev_reg.async_update_device(channel_device.id, via_device_id=nvr_device.id)
     await hass.config_entries.async_forward_entry_setups(entry, NVR_PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 

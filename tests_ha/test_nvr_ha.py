@@ -317,6 +317,8 @@ async def test_web_backend_setup_and_relay(hass: HomeAssistant, hass_client_no_a
     from homeassistant.helpers import device_registry as dr
     nvr_dev = dr.async_get(hass).async_get_device({(DOMAIN, f"nvr_{entry.entry_id}")})
     assert nvr_dev.model == "VIGI NVR1008H(UN) 2.20" and nvr_dev.sw_version == "1.1.2"
+    ch2 = dr.async_get(hass).async_get_device({(DOMAIN, f"nvr_{entry.entry_id}_ch2")})
+    assert ch2.via_device_id == nvr_dev.id and ch2.name == "Yard"
 
     # stream_source is the local relay, and the relay serves the NVR's TS bytes.
     data = hass.data[DOMAIN][entry.entry_id]
