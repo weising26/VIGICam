@@ -208,3 +208,35 @@ def test_tls_context_reaches_legacy_only_server(tmp_path):
     strict_ok, data = asyncio.run(main())
     assert not strict_ok
     assert data == b"ok"
+
+
+def test_login_url_encodes_ciphertext():
+    """The NVR URL-decodes the password field, so "+" in the base64 must go as %2B."""
+    import urllib.parse as up
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    spki = key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    key_b64 = up.quote(__import__("base64").b64encode(spki).decode(), safe="")
+    sent = {}
+
+    api = nvr_web.VIGINVRWeb("10.0.0.1", "admin", PASSWORD)
+
+    async def fake_post(url, body):
+        if "user_management" in body:
+            return {"error_code": -40401, "data": {"code": -40401, "encrypt_type": ["1", "2"],
+                                                   "key": key_b64, "nonce": "qPtEDcPl"}}
+        sent.update(body["login"])
+        raw = up.unquote_plus(body["login"]["password"])  # "+" -> space, as a form decoder does
+        plain = key.decrypt(__import__("base64").b64decode(raw), padding.PKCS1v15()).decode()
+        import hashlib
+        want = hashlib.md5(f"TPCQ75NF2Y:{PASSWORD}".encode()).hexdigest().upper() + ":qPtEDcPl"
+        return {"error_code": 0, "stok": "abc123"} if plain == want else {"error_code": -40401}
+
+    api._cam._post = fake_post
+    api._ensure_session = lambda: None
+    for _ in range(20):  # PKCS#1 padding is random; make sure "+" cases are hit
+        asyncio.run(api.login())
+        assert api._cam._stok == "abc123"
+        assert "+" not in sent["password"] and sent["encrypt_type"] == "2"

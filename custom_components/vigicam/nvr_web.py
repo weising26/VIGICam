@@ -35,7 +35,7 @@ from typing import Any
 
 import aiohttp
 
-from .api import VIGICamera
+from .api import VIGIAuthError, VIGICamera
 from .event_image import _ws_encode, _ws_recv
 
 _LOGGER = logging.getLogger(__name__)
@@ -187,6 +187,7 @@ class VIGINVRWeb:
         self._ssl: ssl.SSLContext = nvr_ssl_context()
         self._session: aiohttp.ClientSession | None = None
         self._cam = VIGICamera(host, username, password, session=None)
+        self._cam.authenticate = self._authenticate  # re-login on expiry goes through ours
 
     def _ensure_session(self) -> None:
         """Hand VIGICamera a session with the wider TLS settings (it never closes it)."""
@@ -203,7 +204,38 @@ class VIGINVRWeb:
 
     async def login(self) -> None:
         self._ensure_session()
-        await self._cam.authenticate()
+        await self._authenticate()
+
+    async def _authenticate(self) -> None:
+        """The NVR's web login: like the camera one, but the RSA ciphertext is URL-encoded.
+
+        The NVR URL-decodes the password field (its own page sends "%2B"/"%2F"), so a raw
+        base64 "+" would arrive as a space and the login would fail with -40401.
+        """
+        cam = self._cam
+        base = f"https://{self._host}"
+        enc = await cam._post(base + "/", {"user_management": {"get_encrypt_info": None}, "method": "do"})
+        data = enc.get("data") or {}
+        if not data.get("nonce") or not data.get("key"):
+            raise VIGIAuthError(f"Unexpected encrypt_info reply (error_code={enc.get('error_code')})")
+        cipher = cam._encrypt_password(data["nonce"], urllib.parse.unquote(data["key"]))
+        login = await cam._post(base + "/", {
+            "method": "do",
+            "login": {
+                "username": self._username,
+                "password": urllib.parse.quote(cipher, safe=""),
+                "passwdType": "md5",
+                "encrypt_type": "2",
+            },
+        })
+        stok = login.get("stok")
+        if not stok:
+            raise VIGIAuthError(
+                f"Login failed (error_code={login.get('error_code')}, "
+                f"code={(login.get('data') or {}).get('code')}, "
+                f"sec_left={(login.get('data') or {}).get('sec_left')})"
+            )
+        cam._stok = urllib.parse.unquote(stok)
 
     async def close(self) -> None:
         await self._cam.close()
