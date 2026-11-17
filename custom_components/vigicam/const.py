@@ -129,3 +129,6 @@ DEFAULT_NVR_EVENT_HOLD = 15
 EVENT_NVR = "vigicam_nvr_event"               # HA bus event for every pushed NVR message
 SIGNAL_NVR_EVENT = "vigicam_nvr_event_{}"     # dispatcher signal, formatted with entry_id
 REPAIRS_NVR_EVENT_SERVER = "nvr_event_server"
+CONF_NVR_API = "nvr_api"                       # "openapi" (port 20443) or "web" (port 443)
+NVR_API_OPENAPI = "openapi"
+NVR_API_WEB = "web"

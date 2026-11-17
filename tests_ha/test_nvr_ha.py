@@ -229,3 +229,105 @@ async def test_nvr_options_flow(hass: HomeAssistant, nvr):
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["nvr_event_host"] == "192.168.1.10:8123"
+
+
+# ── Web API backend (NVR firmware without OpenAPI) ─────────────────────────────
+
+WEB = "custom_components.vigicam.nvr_web.VIGINVRWeb"
+WEB_DEVICES = [
+    {"id": 1, "name": "客厅", "online": "1", "ip": "10.11.100.203", "firmware": "1.0.3 Build 210304"},
+    {"id": 2, "name": "Yard", "online": "0", "ip": "10.11.100.204"},
+]
+
+
+async def _fake_preview(self, channel, resolution="hd"):
+    yield b"\x47" + bytes([channel]) * 187
+    yield b"\x47" + b"Z" * 187
+
+
+@pytest.fixture
+def web_nvr():
+    with patch(f"{WEB}.login", AsyncMock()), patch(f"{WEB}.close", AsyncMock()), \
+         patch(f"{WEB}.system_info", AsyncMock(return_value={
+             "device_type": "VIGI NVR1008H(UN) 2.20", "firm_ver": "1.1.2 Build 240815 Rel.65006n",
+             "serial_number": "ABC123"})), \
+         patch(f"{WEB}.added_devices", AsyncMock(return_value=WEB_DEVICES)), \
+         patch(f"{WEB}.preview", _fake_preview):
+        yield
+
+
+async def test_config_flow_falls_back_to_web_api(hass: HomeAssistant, web_nvr):
+    from custom_components.vigicam.nvr_api import VIGINVRError
+
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "nvr"})
+    with patch("custom_components.vigicam.nvr_api.VIGINVR.login",
+               AsyncMock(side_effect=VIGINVRError("no OpenAPI"))), \
+         patch("custom_components.vigicam.nvr_api.VIGINVR.close", AsyncMock()), \
+         patch("custom_components.vigicam.async_setup_entry", AsyncMock(return_value=True)):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": "10.11.100.246", "username": "admin", "password": "pw"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["nvr_api"] == "web"
+
+
+async def test_config_flow_web_bad_password(hass: HomeAssistant):
+    from custom_components.vigicam.api import VIGIAuthError
+    from custom_components.vigicam.nvr_api import VIGINVRError
+
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "nvr"})
+    with patch("custom_components.vigicam.nvr_api.VIGINVR.login", AsyncMock(side_effect=VIGINVRError("x"))), \
+         patch("custom_components.vigicam.nvr_api.VIGINVR.close", AsyncMock()), \
+         patch(f"{WEB}.login", AsyncMock(side_effect=VIGIAuthError("bad"))), \
+         patch(f"{WEB}.close", AsyncMock()):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": "10.11.100.246", "username": "admin", "password": "bad"})
+    assert result["errors"] == {"base": "invalid_auth"}
+
+
+async def test_web_backend_setup_and_relay(hass: HomeAssistant, hass_client_no_auth, web_nvr):
+    await async_setup_component(hass, "http", {"http": {}})
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="VIGI NVR", unique_id="nvr_10.11.100.246",
+        data={CONF_DEVICE_TYPE: DEVICE_TYPE_NVR, "nvr_api": "web", "host": "10.11.100.246",
+              "username": "admin", "password": "pw", "name": "VIGI NVR", CONF_WEBHOOK_ID: "hook9"},
+    )
+    entry.add_to_hass(hass)
+    await _setup(hass, entry)
+
+    cam = hass.states.get("camera.ke_ting")
+    assert cam is not None and cam.state != "unavailable"
+    assert hass.states.get("camera.yard").state == "unavailable"
+    assert hass.states.get("binary_sensor.ke_ting_online").state == "on"
+    assert hass.states.get("sensor.vigi_nvr_cameras_online").state == "1"
+    # No OpenAPI-only entities on this backend.
+    assert hass.states.get("switch.vigi_nvr_alarm_mode") is None
+    assert hass.states.get("button.vigi_nvr_reboot") is None
+    assert hass.states.get("binary_sensor.ke_ting_motion") is None
+
+    from homeassistant.helpers import device_registry as dr
+    nvr_dev = dr.async_get(hass).async_get_device({(DOMAIN, f"nvr_{entry.entry_id}")})
+    assert nvr_dev.model == "VIGI NVR1008H(UN) 2.20" and nvr_dev.sw_version == "1.1.2"
+
+    # stream_source is the local relay, and the relay serves the NVR's TS bytes.
+    data = hass.data[DOMAIN][entry.entry_id]
+    entity = hass.data["camera"].get_entity("camera.ke_ting")
+    src = await entity.stream_source()
+    assert src.endswith(f"/api/vigicam_nvr_stream/{data['relay_token']}/1")
+
+    client = await hass_client_no_auth()
+    resp = await client.get(f"/api/vigicam_nvr_stream/{data['relay_token']}/1")
+    assert resp.status == 200 and resp.headers["Content-Type"] == "video/mp2t"
+    assert await resp.read() == b"\x47" + b"\x01" * 187 + b"\x47" + b"Z" * 187
+    assert (await client.get("/api/vigicam_nvr_stream/wrongtoken/1")).status == 404
+
+    # Snapshot: one frame grabbed from the relay with ffmpeg.
+    with patch("homeassistant.components.ffmpeg.async_get_image",
+               AsyncMock(return_value=b"\xff\xd8jpg")) as grab:
+        from homeassistant.components.camera import async_get_image
+        image = await async_get_image(hass, "camera.ke_ting")
+    assert image.content == b"\xff\xd8jpg"
+    assert grab.await_args.args[1] == src
+
+    assert await hass.config_entries.async_unload(entry.entry_id)

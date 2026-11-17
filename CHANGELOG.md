@@ -25,6 +25,10 @@ Versions follow [Semantic Versioning](https://semver.org/): MAJOR.MINOR.PATCH.
   integration takes one free event-server slot on the NVR and never overwrites a slot
   it didn't create. Every push is also fired as a `vigicam_nvr_event` bus event.
 - Adding a camera now starts with a choice of **Camera** or **NVR**.
+- **NVRs without OpenAPI** (older firmware) are supported through the NVR's web
+  interface: cameras, online status, live view and snapshots. Live view is relayed from
+  the NVR's port 8443 stream. The integration picks this route automatically when
+  OpenAPI isn't available.
 
 ---
 

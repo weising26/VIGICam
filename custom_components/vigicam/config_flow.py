@@ -29,6 +29,7 @@ from .const import (
     CONF_DETECTION_IMAGE_AUDIO,
     CONF_DEVICE_TYPE,
     CONF_LEGACY_TLS,
+    CONF_NVR_API,
     CONF_NVR_EVENT_HOLD,
     CONF_NVR_EVENT_HOST,
     CONF_NVR_EVENT_PUSH,
@@ -37,6 +38,8 @@ from .const import (
     DEFAULT_NVR_EVENT_HOST,
     DEFAULT_NVR_EVENT_PUSH,
     DEVICE_TYPE_NVR,
+    NVR_API_OPENAPI,
+    NVR_API_WEB,
     CONF_STREAM_USE_MAIN,
     CONF_VERIFY_SSL,
     DEFAULT_FEATURE_CAMERA_STREAM,
@@ -51,6 +54,7 @@ from .const import (
 )
 from .frigate import detect_frigate_camera
 from .nvr_api import VIGINVR, VIGINVRAuthError
+from .nvr_web import VIGINVRWeb
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -295,6 +299,16 @@ async def _test_nvr(host: str, username: str, password: str) -> int:
         await api.close()
 
 
+async def _test_nvr_web(host: str, username: str, password: str) -> int:
+    """Log in to the NVR's web API (443) and count its channels. Raises on failure."""
+    api = VIGINVRWeb(host, username, password)
+    try:
+        await api.login()
+        return len(await api.added_devices())
+    finally:
+        await api.close()
+
+
 class VIGINVROptionsFlow(config_entries.OptionsFlow):
     """Options for an NVR entry: stream quality and event push."""
 
@@ -435,15 +449,25 @@ class VIGIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             username = user_input.get(CONF_USERNAME, DEFAULT_USERNAME).strip()
             password = user_input[CONF_PASSWORD]
             name = user_input.get(CONF_NAME, "").strip()
+            api_kind = NVR_API_OPENAPI
             try:
                 channels = await _test_nvr(host, username, password)
             except VIGINVRAuthError as exc:
                 _LOGGER.debug("NVR authentication failed for %s: %s", host, exc)
                 errors["base"] = "invalid_auth"
             except Exception as exc:  # noqa: BLE001 - see async_step_camera
-                _LOGGER.debug("NVR connection failed for %s: %s", host, exc, exc_info=True)
-                errors["base"] = "nvr_cannot_connect"
-            else:
+                # No OpenAPI (older firmware, or turned off): use the web API on 443.
+                _LOGGER.debug("NVR OpenAPI not available on %s (%s); trying the web API", host, exc)
+                api_kind = NVR_API_WEB
+                try:
+                    channels = await _test_nvr_web(host, username, password)
+                except VIGIAuthError as exc2:
+                    _LOGGER.debug("NVR web login failed for %s: %s", host, exc2)
+                    errors["base"] = "invalid_auth"
+                except Exception as exc2:  # noqa: BLE001
+                    _LOGGER.debug("NVR web API failed for %s: %s", host, exc2, exc_info=True)
+                    errors["base"] = "nvr_cannot_connect"
+            if not errors:
                 await self.async_set_unique_id(f"nvr_{host}")
                 self._abort_if_unique_id_configured(
                     updates={CONF_USERNAME: username, CONF_PASSWORD: password}
@@ -454,6 +478,7 @@ class VIGIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title=title,
                     data={
                         CONF_DEVICE_TYPE: DEVICE_TYPE_NVR,
+                        CONF_NVR_API: api_kind,
                         CONF_HOST: host,
                         CONF_USERNAME: username,
                         CONF_PASSWORD: password,
@@ -496,8 +521,11 @@ class VIGIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             username = user_input.get(CONF_USERNAME, self._username).strip()
             password = user_input[CONF_PASSWORD]
             try:
-                await _test_nvr(self._host, username, password)
-            except VIGINVRAuthError:
+                if entry.data.get(CONF_NVR_API) == NVR_API_WEB:
+                    await _test_nvr_web(self._host, username, password)
+                else:
+                    await _test_nvr(self._host, username, password)
+            except (VIGINVRAuthError, VIGIAuthError):
                 errors["base"] = "invalid_auth"
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.debug("NVR reauth failed for %s: %s", self._host, exc, exc_info=True)

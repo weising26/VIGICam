@@ -8,6 +8,7 @@ camera supports it. On the NVR: disk sensors, alarm mode switch, PoE power, rebo
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -18,6 +19,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.components import ffmpeg
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.components.sensor import (
@@ -43,8 +45,10 @@ from .const import (
     DEFAULT_NVR_EVENT_HOLD,
     DEFAULT_STREAM_USE_MAIN,
     DOMAIN,
+    NVR_API_WEB,
     SIGNAL_NVR_EVENT,
 )
+from .nvr_relay import relay_url
 from .nvr_api import VIGINVRError
 from .nvr_coordinator import VIGINVRCoordinator, channel_online
 
@@ -96,6 +100,8 @@ class VIGINVREntity(CoordinatorEntity[VIGINVRCoordinator]):
         self._entry = entry
         self._nvr_name = data["name"]
         self._api = data["api"]
+        self._backend = data.get("backend")
+        self._info = data.get("info") or {}
         self._attr_unique_id = f"nvr_{entry.entry_id}_{key}"
 
     @property
@@ -108,7 +114,9 @@ class VIGINVREntity(CoordinatorEntity[VIGINVRCoordinator]):
             identifiers={self._nvr_identifier},
             name=self._nvr_name,
             manufacturer=BRAND,
-            model="VIGI NVR",
+            model=self._info.get("device_type") or "VIGI NVR",
+            sw_version=(self._info.get("firm_ver") or "").split(" Build")[0] or None,
+            serial_number=self._info.get("serial_number"),
             configuration_url=f"https://{self._api.host}",
         )
 
@@ -135,6 +143,8 @@ class VIGINVRChannelEntity(VIGINVREntity):
             model=f"NVR channel {self._channel}",
             via_device=self._nvr_identifier,
         )
+        if dev.get("firmware"):
+            info["sw_version"] = str(dev["firmware"]).split(" Build")[0]
         if dev.get("ip"):
             info["configuration_url"] = f"http://{dev['ip']}"
         return info
@@ -165,12 +175,28 @@ class VIGINVRCamera(VIGINVRChannelEntity, Camera):
         Camera.__init__(self)
         self._stream = 1 if use_main else 2
 
+    def _relay_url(self) -> str:
+        token = _data(self.hass, self._entry)["relay_token"]
+        return relay_url(self.hass, token, self._channel)
+
     async def stream_source(self) -> str | None:
+        if self._backend == NVR_API_WEB:
+            return self._relay_url()
         return self._api.rtsp_url(self._channel, self._stream)
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
+        if self._backend == NVR_API_WEB:
+            # No snapshot call on this firmware: grab one frame from the live stream.
+            try:
+                return await asyncio.wait_for(
+                    ffmpeg.async_get_image(self.hass, self._relay_url(), width=width, height=height),
+                    timeout=20,
+                )
+            except TimeoutError:
+                _LOGGER.debug("NVR %s ch%s: snapshot timed out", self._api.host, self._channel)
+                return None
         try:
             return await self._api.snapshot(self._channel)
         except (VIGINVRError, aiohttp.ClientError, TimeoutError) as exc:

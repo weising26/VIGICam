@@ -8,7 +8,28 @@ This uses TP-Link's official **VIGI NVR OpenAPI** (document v1.4). It is a diffe
 from the camera one the rest of this integration uses, so NVR entries have their own
 entities and options.
 
-## Before you start
+## Two ways in
+
+The integration picks one automatically when you add the NVR:
+
+| | OpenAPI (port 20443) | Web interface (ports 443 + 8443) |
+|---|---|---|
+| Needs | Newer firmware with OpenAPI turned on | Any firmware the web page works on |
+| Cameras, online status, live view, snapshots | Yes | Yes |
+| Pushed detection events | Yes | Not yet |
+| Arm/disarm, alarm mode, disks, reboot | Yes | Not yet |
+| PTZ | Not yet | Not yet |
+
+It tries OpenAPI first. If the NVR doesn't answer on 20443, it logs in to the NVR's web
+interface instead, the same way the NVR's own web page does. That route was worked out
+from a VIGI NVR1008H(UN) 2.20 on firmware 1.1.2 (Build 240815), which has no OpenAPI.
+
+On the web route, live view comes from the NVR's stream service on port 8443 (MPEG-TS
+over a WebSocket). Home Assistant can't play that directly, so the integration relays it
+inside Home Assistant as a plain stream, at a local address with a random token that
+changes on every restart. Snapshots are one frame grabbed from that stream.
+
+## Before you start (OpenAPI route)
 
 1. Check that your NVR is on TP-Link's
    [Devices Supported by VIGI Open API](https://www.tp-link.com/en/vigi-open-api/product-list/)

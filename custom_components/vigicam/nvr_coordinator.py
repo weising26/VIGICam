@@ -12,6 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .api import VIGIAuthError, VIGIError
 from .nvr_api import VIGINVR, VIGINVRAuthError, VIGINVRError
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ class VIGINVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """
 
     def __init__(
-        self, hass: HomeAssistant, api: VIGINVR, modules: dict[str, int], name: str
+        self, hass: HomeAssistant, api: VIGINVR | Any, modules: dict[str, int], name: str
     ) -> None:
         super().__init__(
             hass,
@@ -72,9 +73,9 @@ class VIGINVRCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             devices = await self.api.added_devices()
-        except VIGINVRAuthError as exc:
+        except (VIGINVRAuthError, VIGIAuthError) as exc:
             raise ConfigEntryAuthFailed(str(exc)) from exc
-        except (VIGINVRError, aiohttp.ClientError, TimeoutError) as exc:
+        except (VIGINVRError, VIGIError, aiohttp.ClientError, TimeoutError) as exc:
             raise UpdateFailed(f"{type(exc).__name__}: {exc}") from exc
 
         by_channel: dict[int, dict] = {}

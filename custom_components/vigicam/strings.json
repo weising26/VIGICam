@@ -20,7 +20,7 @@
       },
       "nvr": {
         "title": "Add VIGI NVR",
-        "description": "Enter the NVR's local IP address and admin credentials.\n\nOpenAPI must be turned on first: in the NVR's web interface go to **Settings > Network > OpenAPI** and enable it (port 20443). Older firmware may need updating before it offers OpenAPI.",
+        "description": "Enter the NVR's local IP address and admin credentials.\n\nIf OpenAPI is enabled on the NVR (Settings > Network > OpenAPI, port 20443) it is used and gives the most features. Otherwise the integration uses the NVR's web interface (port 443) and live stream (port 8443), which gives cameras and live view.",
         "data": {
           "host": "IP Address",
           "username": "Username",
@@ -47,7 +47,7 @@
     "error": {
       "cannot_connect": "Cannot connect to camera — check the IP address and ensure the camera is reachable.",
       "invalid_auth": "Invalid username or password.",
-      "nvr_cannot_connect": "Cannot reach the NVR's OpenAPI on port 20443. Check the IP address and that OpenAPI is enabled under Settings > Network > OpenAPI on the NVR."
+      "nvr_cannot_connect": "Cannot reach the NVR. Check the IP address. The integration tries the NVR's OpenAPI (port 20443) first, then its web interface (port 443)."
     },
     "abort": {
       "already_configured": "This camera is already set up in Home Assistant (recognised by its MAC address). Nothing was changed; if it had failed to set up, it is being retried now.",
