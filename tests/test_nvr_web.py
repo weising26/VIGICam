@@ -240,3 +240,26 @@ def test_login_url_encodes_ciphertext():
         asyncio.run(api.login())
         assert api._cam._stok == "abc123"
         assert "+" not in sent["password"] and sent["encrypt_type"] == "2"
+
+
+def test_ptz_bodies_match_ptzlib():
+    api = nvr_web.VIGINVRWeb("10.0.0.1", "admin", PASSWORD)
+    sent = []
+
+    async def fake_call(body):
+        sent.append(body)
+        return {"error_code": 0}
+
+    api.call = fake_call
+
+    async def go():
+        await api.ptz_move(1, nvr_web.PTZ_DIRECTIONS["up"], 0.6)
+        await api.ptz_stop(1)
+        await api.goto_preset(8, 3)
+        await api.ptz_move(2, nvr_web.PTZ_DIRECTIONS["left"], 0.0)
+
+    asyncio.run(go())
+    assert sent[0] == {"ptz": {"move": {"chn_id": 1, "direction": 7, "speed": "0.6"}}, "method": "do"}
+    assert sent[1]["ptz"]["move"]["direction"] == 0
+    assert sent[2] == {"ptz": {"opt_preset": {"chn_id": 8, "preset_id": 3, "opt_type": 2}}, "method": "do"}
+    assert sent[3]["ptz"]["move"] == {"chn_id": 2, "direction": 5, "speed": "0.1"}

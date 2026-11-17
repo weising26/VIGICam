@@ -34,7 +34,7 @@ from .api import VIGIAuthError, VIGIError
 from .nvr_relay import async_register_relay, new_token
 from .nvr_web import VIGINVRWeb
 from .nvr_api import VIGINVR, VIGINVRAuthError, VIGINVRError
-from .nvr_coordinator import VIGINVRCoordinator
+from .nvr_coordinator import VIGINVRCoordinator, channel_online
 from .nvr_events import (
     async_configure_event_server,
     async_register_webhook,
@@ -49,6 +49,7 @@ NVR_PLATFORMS = [
     Platform.SENSOR,
     Platform.SWITCH,
     Platform.BUTTON,
+    Platform.SELECT,
 ]
 
 
@@ -156,6 +157,7 @@ async def _async_setup_web(
     await coordinator.async_config_entry_first_refresh()
 
     async_register_relay(hass)
+    ptz = await _async_read_ptz(api, coordinator)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "device_type": DEVICE_TYPE_NVR,
         "api": api,
@@ -168,10 +170,33 @@ async def _async_setup_web(
         "info": info,
         "relay_token": new_token(),
         "resolution": "hd",
+        "ptz": ptz,
     }
     ir.async_delete_issue(hass, DOMAIN, f"{REPAIRS_NVR_EVENT_SERVER}_{entry.entry_id}")
     await _async_finish_setup(hass, entry, coordinator, host)
     return True
+
+
+async def _async_read_ptz(api: VIGINVRWeb, coordinator: VIGINVRCoordinator) -> dict[int, dict]:
+    """{channel: {"capability", "presets"}} for channels whose camera can pan and tilt.
+
+    A camera without PTZ answers with an empty capability block.
+    """
+    out: dict[int, dict] = {}
+    for ch, dev in sorted(((coordinator.data or {}).get("devices") or {}).items()):
+        if not channel_online(dev):
+            continue
+        try:
+            cap = await api.ptz_capability(ch)
+            if not cap:
+                continue
+            presets = await api.presets(ch) if cap.get("preset_supported") == "1" else []
+        except Exception as exc:  # noqa: BLE001 - PTZ is optional
+            _LOGGER.debug("NVR %s ch%s: no PTZ info: %s", api.host, ch, exc)
+            continue
+        out[ch] = {"capability": cap, "presets": presets}
+    _LOGGER.debug("NVR %s: PTZ channels %s", api.host, sorted(out))
+    return out
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:

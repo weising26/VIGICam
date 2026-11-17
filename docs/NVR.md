@@ -18,7 +18,7 @@ The integration picks one automatically when you add the NVR:
 | Cameras, online status, live view, snapshots | Yes | Yes |
 | Pushed detection events | Yes | Not yet |
 | Arm/disarm, alarm mode, disks, reboot | Yes | Not yet |
-| PTZ | Not yet | Not yet |
+| PTZ (pan/tilt buttons, presets, `vigicam.ptz` services) | Not yet | Yes |
 
 It tries OpenAPI first. If the NVR doesn't answer on 20443, it logs in to the NVR's web
 interface instead, the same way the NVR's own web page does. That route was worked out
@@ -28,6 +28,24 @@ On the web route, live view comes from the NVR's stream service on port 8443 (MP
 over a WebSocket). Home Assistant can't play that directly, so the integration relays it
 inside Home Assistant as a plain stream, at a local address with a random token that
 changes on every restart. Snapshots are one frame grabbed from that stream.
+
+### PTZ on the web route
+
+For each channel whose camera reports pan/tilt, you get **Pan left**, **Pan right**,
+**Tilt up** and **Tilt down** buttons (each press nudges the camera for half a second)
+and a **PTZ preset** select listing the presets saved on the NVR. The integration's
+existing services work on those channels too, targeting the channel's camera entity:
+
+```yaml
+action: vigicam.ptz
+data:
+  entity_id: camera.front_door
+  direction: left        # left, right, up, down, zoom_in, zoom_out
+  speed: 0.6             # 0.1 to 1.0
+  duration: 1.5          # seconds, then it stops
+```
+
+`vigicam.ptz_stop` and `vigicam.goto_preset` (by preset name) work the same way.
 
 ## Before you start (OpenAPI route)
 

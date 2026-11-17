@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import aiohttp
 
@@ -54,6 +55,7 @@ from .onvif_events import VIGIOnvifEvents
 from .onvif_port import DEFAULT_ONVIF_PORT, discover_onvif_port
 from .onvif_ptz import DEFAULT_SPEED, VIGIOnvifPtz
 from .openapi import VIGIOpenAPI, try_openapi
+from .nvr_web import PTZ_DIRECTIONS as NVR_PTZ_DIRECTIONS
 from .nvr import (
     async_remove_nvr_entry,
     async_setup_nvr_entry,
@@ -298,8 +300,37 @@ class _Outcome:
             )
 
 
-def _iter_targets(
+def _nvr_target(hass: HomeAssistant, entity_id: str) -> tuple[dict, int] | None:
+    """(entry_data, channel) when *entity_id* is an NVR channel's entity, else None."""
+    entry = er.async_get(hass).async_get(entity_id)
+    if not entry or not entry.config_entry_id:
+        return None
+    data = hass.data.get(DOMAIN, {}).get(entry.config_entry_id)
+    if not data or data.get("device_type") != DEVICE_TYPE_NVR:
+        return None
+    match = re.search(r"_ch(\d+)_", entry.unique_id or "")
+    return (data, int(match.group(1))) if match else None
+
+
+def _nvr_targets(
     hass: HomeAssistant, call: ServiceCall, service: str
+) -> list[tuple[str, dict, int]]:
+    """The NVR-channel entities a PTZ service call targets."""
+    raw = call.data["entity_id"]
+    out = []
+    for eid in (raw if isinstance(raw, list) else [raw]):
+        hit = _nvr_target(hass, eid)
+        if hit is None:
+            continue
+        data, channel = hit
+        if channel not in (data.get("ptz") or {}):
+            raise ServiceValidationError(f"vigicam.{service}: {eid} has no PTZ")
+        out.append((eid, data, channel))
+    return out
+
+
+def _iter_targets(
+    hass: HomeAssistant, call: ServiceCall, service: str, *, skip_nvr: bool = False
 ) -> list[tuple[str, dict]]:
     """Return [(entity_id, entry_data), ...] for every camera the call targets.
 
@@ -310,6 +341,8 @@ def _iter_targets(
     raw = call.data["entity_id"]
     targets: list[tuple[str, dict]] = []
     for eid in (raw if isinstance(raw, list) else [raw]):
+        if skip_nvr and _nvr_target(hass, eid) is not None:
+            continue  # handled by the NVR branch of the service
         data = _entry_data_for_entity(hass, eid)
         if data is None:
             raise ServiceValidationError(
@@ -439,7 +472,15 @@ def _register_services(hass: HomeAssistant) -> None:
 
         moving: list[VIGIOnvifPtz] = []
         outcome = _Outcome("ptz")
-        for eid, data in _iter_targets(hass, call, "ptz"):
+        nvr_moving: list[tuple[object, int]] = []
+        for eid, ndata, channel in _nvr_targets(hass, call, "ptz"):
+            try:
+                await ndata["api"].ptz_move(channel, NVR_PTZ_DIRECTIONS[call.data["direction"]], speed)
+            except Exception as exc:
+                outcome.failed.append(f"{eid}: {exc}")
+                continue
+            nvr_moving.append((ndata["api"], channel))
+        for eid, data in _iter_targets(hass, call, "ptz", skip_nvr=True):
             if not data.get("onvif_ptz"):
                 outcome.invalid.append(f"{eid} has no PTZ")
                 continue
@@ -454,15 +495,22 @@ def _register_services(hass: HomeAssistant) -> None:
             moving.append(ptz)
 
         # One shared sleep, then stop every camera that started moving.
-        if duration and moving:
+        if duration and (moving or nvr_moving):
             await asyncio.sleep(duration)
             for ptz in moving:
                 await ptz.stop()
+            for nvr_api, channel in nvr_moving:
+                await nvr_api.ptz_stop(channel)
         outcome.raise_if_any()
 
     async def handle_ptz_stop(call: ServiceCall) -> None:
         outcome = _Outcome("ptz_stop")
-        for eid, data in _iter_targets(hass, call, "ptz_stop"):
+        for eid, ndata, channel in _nvr_targets(hass, call, "ptz_stop"):
+            try:
+                await ndata["api"].ptz_stop(channel)
+            except Exception as exc:
+                outcome.failed.append(f"{eid}: {exc}")
+        for eid, data in _iter_targets(hass, call, "ptz_stop", skip_nvr=True):
             if not data.get("onvif_ptz"):
                 continue
             try:
@@ -474,7 +522,20 @@ def _register_services(hass: HomeAssistant) -> None:
     async def handle_goto_preset(call: ServiceCall) -> None:
         preset_name = call.data["preset"]
         outcome = _Outcome("goto_preset")
-        for eid, data in _iter_targets(hass, call, "goto_preset"):
+        for eid, ndata, channel in _nvr_targets(hass, call, "goto_preset"):
+            presets = ndata["ptz"][channel].get("presets") or []
+            preset = next((p for p in presets if p.get("name") == preset_name), None)
+            if not preset:
+                outcome.invalid.append(
+                    f"no preset '{preset_name}' on {eid} "
+                    f"(available: {', '.join(str(p.get('name')) for p in presets) or 'none'})"
+                )
+                continue
+            try:
+                await ndata["api"].goto_preset(channel, int(preset["preset_id"]))
+            except Exception as exc:
+                outcome.failed.append(f"{eid}: {exc}")
+        for eid, data in _iter_targets(hass, call, "goto_preset", skip_nvr=True):
             # The coordinator's copy, not entry_data["presets"]: the latter is captured
             # once at setup and never refreshed, so a preset added or renamed on the
             # camera after HA started was never found here. The 0.7.4 refresh fix landed
@@ -773,7 +834,9 @@ def _register_services(hass: HomeAssistant) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if is_nvr_entry(entry):
-        return await async_setup_nvr_entry(hass, entry)
+        ok = await async_setup_nvr_entry(hass, entry)
+        _register_services(hass)
+        return ok
 
     # Remove entities that belong to disabled feature groups before creating
     # new ones — prevents unavailable stubs accumulating after options changes.

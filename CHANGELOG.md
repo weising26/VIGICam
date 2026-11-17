@@ -29,6 +29,8 @@ Versions follow [Semantic Versioning](https://semver.org/): MAJOR.MINOR.PATCH.
   interface: cameras, online status, live view and snapshots. Live view is relayed from
   the NVR's port 8443 stream. The integration picks this route automatically when
   OpenAPI isn't available.
+- **PTZ through the NVR** (web route): pan/tilt buttons, a preset select, and the
+  `vigicam.ptz`, `vigicam.ptz_stop` and `vigicam.goto_preset` services on NVR channels.
 
 ---
 

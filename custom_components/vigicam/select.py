@@ -21,6 +21,8 @@ from .const import (
     PRE_NIGHT_VISION_WHITE_LED_MODES,
 )
 from .entity import VIGIEntity
+from . import nvr_entities
+from .nvr import is_nvr_entry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +97,9 @@ IMAGE_CONTROL_SELECTS: tuple[VIGISelectDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
+    if is_nvr_entry(entry):
+        await nvr_entities.async_setup_select(hass, entry, async_add_entities)
+        return
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator = data["coordinator"]
     coord_data = coordinator.data or {}

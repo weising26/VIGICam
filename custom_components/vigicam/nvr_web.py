@@ -173,6 +173,13 @@ def nvr_ssl_context() -> ssl.SSLContext:
     return ctx
 
 
+PTZ_STOP = 0
+PTZ_DIRECTIONS = {
+    "right": 1, "down_right": 2, "down": 3, "down_left": 4, "left": 5,
+    "up_left": 6, "up": 7, "up_right": 8, "zoom_in": 10, "zoom_out": 11,
+}
+
+
 class VIGINVRStreamError(Exception):
     pass
 
@@ -292,6 +299,24 @@ class VIGINVRWeb:
             {**p, "name": urllib.parse.unquote(str(p.get("name", "")))}
             for p in reply.get("preset") or [] if isinstance(p, dict)
         ]
+
+    # ── PTZ (ptzlib in the NVR's ptz.js) ─────────────────────────────────────
+
+    async def ptz_move(self, channel: int, direction: int, speed: float = 0.6) -> None:
+        """Start moving. Directions: 1 right, 2 right-down, 3 down, 4 left-down, 5 left,
+        6 left-up, 7 up, 8 right-up, 10 zoom in, 11 zoom out; 0 stops."""
+        await self.call({"ptz": {"move": {
+            "chn_id": int(channel), "direction": int(direction),
+            "speed": f"{min(1.0, max(0.1, float(speed))):.1f}",
+        }}, "method": "do"})
+
+    async def ptz_stop(self, channel: int) -> None:
+        await self.ptz_move(channel, PTZ_STOP, 0.6)
+
+    async def goto_preset(self, channel: int, preset_id: int) -> None:
+        await self.call({"ptz": {"opt_preset": {
+            "chn_id": int(channel), "preset_id": int(preset_id), "opt_type": 2,
+        }}, "method": "do"})
 
     # ── Live stream ──────────────────────────────────────────────────────────
 

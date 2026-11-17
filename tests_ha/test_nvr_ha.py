@@ -252,8 +252,16 @@ def web_nvr():
              "device_type": "VIGI NVR1008H(UN) 2.20", "firm_ver": "1.1.2 Build 240815 Rel.65006n",
              "serial_number": "ABC123"})), \
          patch(f"{WEB}.added_devices", AsyncMock(return_value=WEB_DEVICES)), \
-         patch(f"{WEB}.preview", _fake_preview):
-        yield
+         patch(f"{WEB}.preview", _fake_preview), \
+         patch(f"{WEB}.ptz_capability", AsyncMock(side_effect=lambda ch: (
+             {"preset_supported": "1", "x_min": "-1.0"} if ch == 1 else {}))), \
+         patch(f"{WEB}.presets", AsyncMock(return_value=[
+             {"preset_id": 1, "read_only": 0, "name": "Gate"},
+             {"preset_id": 2, "read_only": 0, "name": "Door"}])), \
+         patch(f"{WEB}.ptz_move", AsyncMock()) as move, \
+         patch(f"{WEB}.ptz_stop", AsyncMock()) as stop, \
+         patch(f"{WEB}.goto_preset", AsyncMock()) as goto:
+        yield {"move": move, "stop": stop, "goto": goto}
 
 
 async def test_config_flow_falls_back_to_web_api(hass: HomeAssistant, web_nvr):
@@ -330,4 +338,46 @@ async def test_web_backend_setup_and_relay(hass: HomeAssistant, hass_client_no_a
     assert image.content == b"\xff\xd8jpg"
     assert grab.await_args.args[1] == src
 
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_web_backend_ptz(hass: HomeAssistant, web_nvr):
+    await async_setup_component(hass, "http", {"http": {}})
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="VIGI NVR", unique_id="nvr_10.11.100.246",
+        data={CONF_DEVICE_TYPE: DEVICE_TYPE_NVR, "nvr_api": "web", "host": "10.11.100.246",
+              "username": "admin", "password": "pw", "name": "VIGI NVR", CONF_WEBHOOK_ID: "hook9"},
+    )
+    entry.add_to_hass(hass)
+    await _setup(hass, entry)
+
+    # Channel 1 has PTZ, channel 2 (offline, no capability) doesn't.
+    assert hass.states.get("button.ke_ting_pan_left") is not None
+    assert hass.states.get("button.yard_pan_left") is None
+    sel = hass.states.get("select.ke_ting_ptz_preset")
+    assert sel.attributes["options"] == ["Gate", "Door"]
+
+    with patch("custom_components.vigicam.nvr_entities.PTZ_PULSE", 0):
+        await hass.services.async_call("button", "press", {"entity_id": "button.ke_ting_tilt_up"}, blocking=True)
+    web_nvr["move"].assert_awaited_with(1, 7, 0.6)
+    web_nvr["stop"].assert_awaited_with(1)
+
+    await hass.services.async_call("select", "select_option",
+                                   {"entity_id": "select.ke_ting_ptz_preset", "option": "Door"}, blocking=True)
+    web_nvr["goto"].assert_awaited_with(1, 2)
+    assert hass.states.get("select.ke_ting_ptz_preset").state == "Door"
+
+    # The existing vigicam.* PTZ services work on NVR channels too.
+    web_nvr["move"].reset_mock(); web_nvr["stop"].reset_mock()
+    await hass.services.async_call(DOMAIN, "ptz", {"entity_id": "camera.ke_ting", "direction": "left",
+                                                   "speed": 0.4, "duration": 0.1}, blocking=True)
+    web_nvr["move"].assert_awaited_with(1, 5, 0.4)
+    web_nvr["stop"].assert_awaited_with(1)
+    await hass.services.async_call(DOMAIN, "goto_preset", {"entity_id": "camera.ke_ting", "preset": "Gate"},
+                                   blocking=True)
+    web_nvr["goto"].assert_awaited_with(1, 1)
+    from homeassistant.exceptions import ServiceValidationError
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(DOMAIN, "ptz", {"entity_id": "camera.yard", "direction": "up"},
+                                       blocking=True)
     assert await hass.config_entries.async_unload(entry.entry_id)

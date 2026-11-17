@@ -22,6 +22,7 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.components import ffmpeg
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.select import SelectEntity
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -479,6 +480,11 @@ async def async_setup_button(
     entities: list[ButtonEntity] = []
     if coordinator.has_module("system"):
         entities.append(VIGINVRRebootButton(hass, entry))
+    for ch in sorted(_data(hass, entry).get("ptz") or {}):
+        entities.extend(
+            VIGINVRPtzButton(hass, entry, ch, key, name, icon)
+            for key, name, icon in PTZ_BUTTONS
+        )
     if coordinator.has_module("alarm_output"):
         entities.append(VIGINVRAlarmButton(hass, entry))
         entities.extend(
@@ -530,10 +536,77 @@ class VIGINVRChannelAlarmButton(VIGINVRChannelEntity, ButtonEntity):
         await _call(self._api.ipc_manual_alarm(self._channel, True), "Camera alarm output")
 
 
+# ── PTZ (web backend) ─────────────────────────────────────────────────────────
+
+PTZ_PULSE = 0.5   # seconds a button press moves for
+PTZ_SPEED = 0.6   # the NVR page's default speed
+PTZ_BUTTONS = (
+    ("left",  "Pan left",  "mdi:arrow-left-bold"),
+    ("right", "Pan right", "mdi:arrow-right-bold"),
+    ("up",    "Tilt up",   "mdi:arrow-up-bold"),
+    ("down",  "Tilt down", "mdi:arrow-down-bold"),
+)
+
+
+class VIGINVRPtzButton(VIGINVRChannelEntity, ButtonEntity):
+    """Nudge the camera: move for PTZ_PULSE seconds, then stop."""
+
+    def __init__(self, hass, entry, channel: int, key: str, name: str, icon: str) -> None:
+        super().__init__(hass, entry, channel, f"ptz_{key}")
+        self._direction = key
+        self._attr_name = name
+        self._attr_icon = icon
+
+    async def async_press(self) -> None:
+        from .nvr_web import PTZ_DIRECTIONS
+
+        await _call(
+            self._api.ptz_move(self._channel, PTZ_DIRECTIONS[self._direction], PTZ_SPEED),
+            "PTZ move",
+        )
+        try:
+            await asyncio.sleep(PTZ_PULSE)
+        finally:
+            await _call(self._api.ptz_stop(self._channel), "PTZ stop")
+
+
+async def async_setup_select(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    async_add_entities(
+        VIGINVRPresetSelect(hass, entry, ch)
+        for ch, info in sorted((_data(hass, entry).get("ptz") or {}).items())
+        if info.get("presets")
+    )
+
+
+class VIGINVRPresetSelect(VIGINVRChannelEntity, SelectEntity):
+    """Move to a preset. Shows the last preset chosen here (the NVR doesn't report it)."""
+
+    _attr_name = "PTZ preset"
+    _attr_icon = "mdi:camera-marker"
+
+    def __init__(self, hass, entry, channel: int) -> None:
+        super().__init__(hass, entry, channel, "ptz_preset")
+        presets = _data(hass, entry)["ptz"][channel]["presets"]
+        self._ids = {}
+        for p in presets:
+            name = str(p.get("name") or f"Preset {p.get('preset_id')}")
+            self._ids[name] = int(p["preset_id"])
+        self._attr_options = list(self._ids)
+        self._attr_current_option = None
+
+    async def async_select_option(self, option: str) -> None:
+        await _call(self._api.goto_preset(self._channel, self._ids[option]), "Go to preset")
+        self._attr_current_option = option
+        self.async_write_ha_state()
+
+
 PLATFORM_SETUP: dict[str, Callable] = {
     "camera": async_setup_camera,
     "binary_sensor": async_setup_binary_sensor,
     "sensor": async_setup_sensor,
     "switch": async_setup_switch,
     "button": async_setup_button,
+    "select": async_setup_select,
 }
